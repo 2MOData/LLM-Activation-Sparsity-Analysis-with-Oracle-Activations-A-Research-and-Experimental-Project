@@ -1,0 +1,34 @@
+# Environnement
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Données et sorties lourdes (ne jamais commiter)
+data/*
+!data/README.md
+activations/
+outputs/
+runs/
+checkpoints/
+*.pt
+*.pth
+*.safetensors
+*.bin
+*.npy
+*.npz
+*.h5
+*.parquet
+
+# Secrets
+.env
+*.token
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

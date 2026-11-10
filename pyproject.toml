@@ -1,0 +1,53 @@
+[project]
+name = "procom"
+version = "0.1.0"
+description = "Sparsité d'activation dans les LLM guidée par un oracle"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "torch>=2.7",
+    "transformers>=4.50",
+    "accelerate>=1.5",
+    "datasets>=3.0",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "tqdm>=4.66",
+    "matplotlib>=3.9",
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "ipykernel>=6.29",
+    "pre-commit>=3.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/procom"]
+
+# torch : build CUDA 12.6 sous Linux/Windows, build standard (CPU/MPS) sous macOS.
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu126", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

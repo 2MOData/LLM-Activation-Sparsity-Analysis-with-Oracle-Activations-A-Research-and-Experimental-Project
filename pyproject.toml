@@ -3,10 +3,10 @@ name = "procom"
 version = "0.1.0"
 description = "Sparsité d'activation dans les LLM guidée par un oracle"
 readme = "README.md"
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "torch>=2.7",
-    "transformers>=4.50",
+    "transformers>=4.56",
     "accelerate>=1.5",
     "datasets>=3.0",
     "numpy>=1.26",
@@ -14,6 +14,8 @@ dependencies = [
     "tqdm>=4.66",
     "matplotlib>=3.9",
     "pyyaml>=6.0",
+    "peft>=0.21.2",
+    "bitsandbytes>=0.50.2 ; sys_platform != 'darwin'",
 ]
 
 [dependency-groups]

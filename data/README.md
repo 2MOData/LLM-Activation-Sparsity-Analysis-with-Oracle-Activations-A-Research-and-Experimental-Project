@@ -1,4 +1,4 @@
 # data/
 
-Les données (datasets, activations extraites) ne sont **pas** versionnées dans Git (trop lourdes).
-Indiquer ici où les récupérer (Drive partagé, Hugging Face, script de génération...).
+Data (datasets, extracted activations) is **not** versioned in Git (too heavy).
+Write here where to get it (shared Drive, Hugging Face, generation script...).

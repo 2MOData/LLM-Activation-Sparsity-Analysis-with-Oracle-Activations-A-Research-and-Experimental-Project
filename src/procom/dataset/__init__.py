@@ -1,1 +1,1 @@
-"""Construction du dataset : thèmes de prompts et questions posées à l oracle (responsables : Raph, Momo)."""
+"""Dataset construction: prompt themes and questions asked to the oracle (owners: Raph, Momo)."""

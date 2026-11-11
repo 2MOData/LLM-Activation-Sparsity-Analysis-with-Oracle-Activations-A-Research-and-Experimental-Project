@@ -1,1 +1,1 @@
-"""Méthodes de sparsité : prédicteurs, coupure post-calcul, quantization... (responsables : Raph, Momo)."""
+"""Sparsity methods: predictors, post-computation cutoff, quantization... (owners: Raph, Momo)."""

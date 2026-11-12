@@ -1,107 +1,108 @@
 # LLM Activation Sparsity Analysis with Oracle Activations: A Research and Experimental Project
 
-> Que perd un LLM quand on rend ses activations sparses ? On demande à un *Activation Oracle*,
-> un LLM qui sait lire les activations d'un autre LLM, de nous le dire en langage naturel.
+> What does an LLM lose when its activations are made sparse? We ask an *Activation Oracle*,
+> an LLM that can read another LLM's activations, to tell us in natural language.
 
-Projet PROCOM de Momo, Raph, Max et Léo.
+PROCOM project by Momo, Raph, Max and Léo.
 
-## L'idée
+## The idea
 
-Les méthodes de **sparsité d'activation** (TEAL, prédicteurs type Deja Vu, coupure après calcul, quantization...)
-accélèrent l'inférence en mettant à zéro une partie des activations du LLM. On sait mesurer leur coût
-global (perplexité, précision), mais pas **quelle information** disparaît, ni **dans quelles couches**.
+**Activation sparsity** methods (TEAL, Deja Vu-style predictors, post-computation cutoff, quantization...)
+speed up inference by zeroing out part of the LLM's activations. We know how to measure their overall
+cost (perplexity, accuracy), but not **which information** disappears, nor **in which layers**.
 
-Les **Activation Oracles** (Karvonen et al., 2025, [arXiv:2512.15674](https://arxiv.org/abs/2512.15674),
-dans la lignée de LatentQA) sont des LLM entraînés à lire les activations d'un modèle et à répondre à des
-questions sur ce qu'elles contiennent (« De quel sujet parle le texte ? », « Quelle est la réponse au calcul ? »...).
+**Activation Oracles** (Karvonen et al., 2025, [arXiv:2512.15674](https://arxiv.org/abs/2512.15674),
+following LatentQA) are LLMs trained to read a model's activations and answer questions about
+what they contain ("What topic is the text about?", "What is the answer to the calculation?"...).
 
-Notre idée : **interroger l'oracle sur les activations denses puis sur les activations sparses**, et regarder
-ce qui change. Si l'oracle ne retrouve plus une information après sparsification, c'est que la méthode l'a effacée.
+Our idea: **query the oracle on the dense activations, then on the sparse activations**, and look at
+what changes. If the oracle can no longer recover a piece of information after sparsification, the
+method has erased it.
 
-## Comment on s'y prend
+## How we go about it
 
 ```
-prompt ──► LLM cible ──► activations denses ──────────────► oracle ──► réponse dense
-                    └──► méthode de sparsité ──► activations sparses ──► oracle ──► réponse sparse
-                                                                     comparaison ◄──┘
+prompt ──► target LLM ──► dense activations ─────────────► oracle ──► dense answer
+                     └──► sparsity method ──► sparse activations ──► oracle ──► sparse answer
+                                                                     comparison ◄──┘
 ```
 
-1. **Dataset** : des prompts classés par thème (faits, contexte, calcul, texte prévisible...) et, pour
-   chaque thème, des questions à poser à l'oracle.
-2. **Extraction** : hooks PyTorch qui récupèrent les activations du LLM cible, couche par couche.
-3. **Sparsification** : plusieurs familles de méthodes pour ne pas dépendre d'une seule
-   (prédicteurs, coupure post-calcul type TEAL, quantization...).
-4. **Interrogation de l'oracle** sur les versions dense et sparse, et vérification de sa fiabilité sur des
-   activations sparses, qu'il n'a jamais vues pendant son entraînement.
-5. **Analyse** : heatmaps couche × thème de la perte d'information, comparées à des mesures classiques
-   (divergence KL entre sorties dense et sparse, activation patching).
+1. **Dataset**: prompts grouped by theme (facts, context, calculation, predictable text...) and, for
+   each theme, questions to ask the oracle.
+2. **Extraction**: PyTorch hooks that capture the target LLM's activations, layer by layer.
+3. **Sparsification**: several families of methods so as not to depend on a single one
+   (predictors, TEAL-style post-computation cutoff, quantization...).
+4. **Querying the oracle** on the dense and sparse versions, and checking its reliability on sparse
+   activations, which it never saw during training.
+5. **Analysis**: layer × theme heatmaps of the information loss, compared with standard measures
+   (KL divergence between dense and sparse outputs, activation patching).
 
-**Questions de recherche**
-- Toutes les méthodes de sparsité effacent-elles le même type d'information ?
-- Quelles couches peut-on rendre sparses sans que l'oracle ne remarque de différence ?
-- La perte vue par l'oracle suit-elle les métriques classiques (KL, perplexité) ou révèle-t-elle autre chose ?
+**Research questions**
+- Do all sparsity methods erase the same kind of information?
+- Which layers can be made sparse without the oracle noticing any difference?
+- Does the loss seen by the oracle follow the standard metrics (KL, perplexity), or does it reveal something else?
 
-Une absence de lien entre l'oracle et les métriques classiques serait aussi un résultat.
+A lack of correlation between the oracle and the standard metrics would also be a result.
 
 
-## Installation (une seule fois)
+## Installation (once)
 
-L'environnement est géré par **[uv](https://docs.astral.sh/uv/)** : `pyproject.toml` liste les dépendances,
-`uv.lock` fige toutes les versions (y compris les dépendances indirectes) et `.python-version` fixe Python 3.11.
-Tout le monde a donc exactement le même environnement.
+The environment is managed by **[uv](https://docs.astral.sh/uv/)**: `pyproject.toml` lists the dependencies,
+`uv.lock` pins every version (including indirect dependencies) and `.python-version` sets Python 3.11.
+So everyone has exactly the same environment.
 
-1. Installer uv :
-   - macOS / Linux : `curl -LsSf https://astral.sh/uv/install.sh | sh`
-   - Windows (PowerShell) : `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
-2. Cloner et installer :
+1. Install uv:
+   - macOS / Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+   - Windows (PowerShell): `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
+2. Clone and install:
    ```bash
-   git clone <url-du-depot>
-   cd procom
-   uv sync          # crée .venv/ avec la bonne version de Python et les versions exactes du lock
+   git clone <repo-url>
+   cd <project-name>
+   uv sync          # creates .venv/ with the right Python version and the exact versions from the lock
    uv run python scripts/check_env.py
-   uv run pre-commit install   # formatage automatique avant chaque commit
+   uv run pre-commit install   # automatic formatting before each commit
    ```
 
-uv télécharge lui-même Python 3.11 si besoin. Pas besoin d'activer le venv : préfixer les commandes par `uv run`
-(ou `source .venv/bin/activate` si vous préférez).
+uv downloads Python 3.11 itself if needed. No need to activate the venv: prefix commands with `uv run`
+(or `source .venv/bin/activate` if you prefer).
 
-## torch et CUDA
+## torch and CUDA
 
-- **Linux / Windows** : torch est installé depuis l'index PyTorch **CUDA 12.6** (voir `[tool.uv.sources]`
-  dans `pyproject.toml`). Fonctionne avec un driver NVIDIA récent (≥ 560) ; sans GPU, torch tourne quand même sur CPU.
-- **macOS** : torch standard (CPU + MPS sur puce Apple).
-- Pour changer de version CUDA (par ex. `cu128` sur un serveur de l'école), modifier l'URL de l'index **dans
-  le dépôt**, relancer `uv lock`, et commiter : ne jamais faire de `pip install torch` à la main.
+- **Linux / Windows**: torch is installed from the PyTorch **CUDA 12.6** index (see `[tool.uv.sources]`
+  in `pyproject.toml`). Works with a recent NVIDIA driver (≥ 560); without a GPU, torch still runs on CPU.
+- **macOS**: standard torch (CPU + MPS on Apple silicon).
+- To change the CUDA version (e.g. `cu128` on a school server), change the index URL **in the
+  repo**, rerun `uv lock`, and commit: never run `pip install torch` by hand.
 
-## Règles d'équipe
+## Team rules
 
-- Ajouter une librairie : `uv add <paquet>` (ou `uv add --dev <paquet>` pour un outil), puis **commiter
-  `pyproject.toml` et `uv.lock` ensemble**.
-- Après un `git pull` qui modifie `uv.lock` : `uv sync`.
-- Ne jamais utiliser `pip install` dans le projet.
-- Données, activations et poids de modèles ne vont pas dans Git (voir `.gitignore` et `data/README.md`).
-- Une branche par tâche, puis pull request vers `main`.
+- Adding a library: `uv add <package>` (or `uv add --dev <package>` for a tool), then **commit
+  `pyproject.toml` and `uv.lock` together**.
+- After a `git pull` that changes `uv.lock`: `uv sync`.
+- Never use `pip install` in the project (except on Colab).
+- Data, activations and model weights do not go into Git (see `.gitignore` and `data/README.md`).
+- One branch per task, then a pull request to `main`.
 
 ## Structure
 
 ```
 src/procom/
-  oracle/        # chargement et interrogation de l'Activation Oracle (Max, Léo)
-  activations/   # extraction des activations via hooks PyTorch (Max, Léo)
-  dataset/       # thèmes de prompts et questions posées à l'oracle (Raph, Momo)
-  sparsity/      # méthodes de sparsité : prédicteurs, coupure post-calcul, quantization (Raph, Momo)
-scripts/         # scripts lançables (uv run python scripts/...)
-notebooks/       # explorations (sorties nettoyées automatiquement par nbstripout)
-configs/         # fichiers de config YAML des expériences
+  oracle/        # loading and querying the Activation Oracle (Max, Léo)
+  activations/   # activation extraction via PyTorch hooks (Max, Léo)
+  dataset/       # prompt themes and questions asked to the oracle (Raph, Momo)
+  sparsity/      # sparsity methods: predictors, post-computation cutoff, quantization (Raph, Momo)
+scripts/         # runnable scripts (uv run python scripts/...)
+notebooks/       # explorations (outputs stripped automatically by nbstripout)
+configs/         # YAML config files for experiments
 tests/           # uv run pytest
-data/            # local uniquement, non versionné
+data/            # local only, not versioned
 ```
 
-## Commandes utiles
+## Useful commands
 
 ```bash
 uv run pytest            # tests
 uv run ruff check .      # lint
-uv run ruff format .     # formatage
-uv run jupyter lab       # notebooks (après `uv add --dev jupyterlab`)
+uv run ruff format .     # formatting
+uv run jupyter lab       # notebooks (after `uv add --dev jupyterlab`)
 ```

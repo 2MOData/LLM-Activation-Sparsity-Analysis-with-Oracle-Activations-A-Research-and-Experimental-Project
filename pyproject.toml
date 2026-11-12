@@ -1,12 +1,12 @@
 [project]
 name = "procom"
 version = "0.1.0"
-description = "Sparsité d'activation dans les LLM guidée par un oracle"
+description = "Oracle-guided activation sparsity analysis in LLMs"
 readme = "README.md"
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "torch>=2.7",
-    "transformers>=4.50",
+    "transformers>=4.56",
     "accelerate>=1.5",
     "datasets>=3.0",
     "numpy>=1.26",
@@ -14,6 +14,9 @@ dependencies = [
     "tqdm>=4.66",
     "matplotlib>=3.9",
     "pyyaml>=6.0",
+    "peft>=0.21.2",
+    "torchao>=0.16.0",
+    "bitsandbytes>=0.50.2 ; sys_platform != 'darwin'",
 ]
 
 [dependency-groups]
@@ -31,7 +34,7 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/procom"]
 
-# torch : build CUDA 12.6 sous Linux/Windows, build standard (CPU/MPS) sous macOS.
+# torch: CUDA 12.6 build on Linux/Windows, standard build (CPU/MPS) on macOS.
 [tool.uv.sources]
 torch = [
     { index = "pytorch-cu126", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },

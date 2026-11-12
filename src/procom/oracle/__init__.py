@@ -1,1 +1,1 @@
-"""Oracle : calcule, pour un prompt, les neurones réellement nécessaires (responsables : Max, Léo)."""
+"""Oracle: computes, for a prompt, the neurons actually needed (owners: Max, Léo)."""

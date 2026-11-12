@@ -1,1 +1,1 @@
-"""PROCOM : sparsité d activation guidée par un oracle."""
+"""PROCOM: oracle-guided activation sparsity analysis."""

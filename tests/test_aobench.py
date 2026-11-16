@@ -61,3 +61,30 @@ def test_judge_answer_is_read_even_when_truncated_or_badly_escaped():
         parse('{"reasoning": "no verdict before the cut')
     with pytest.raises(json.JSONDecodeError):
         parse("I cannot grade this.")
+
+
+def test_misspelled_category_snaps_to_the_closest_allowed_one():
+    prompt = (
+        'Respond with ONLY a JSON object: {"category": "<one of: divergent_meaningful, '
+        'divergent_noise, same>", "reasoning": "<brief explanation>"}\n\nRESPONSE A: ...'
+    )
+    assert aobench.snap_category("divergent_meanful", prompt) == "divergent_meaningful"
+    assert aobench.snap_category("Divergent_Noise ", prompt) == "divergent_noise"
+    assert aobench.snap_category("same", prompt) == "same"
+    # Nothing close, or no list of categories in the prompt: left for AObench to count as failed
+    assert aobench.snap_category("unsure", prompt) == "unsure"
+    assert aobench.snap_category("divergent_meanful", "Rate from 1 to 5.") == "divergent_meanful"
+    assert aobench.snap_category(3, prompt) == 3
+
+
+def test_only_the_placeholder_adapter_report_is_hidden():
+    header = "Qwen3ForCausalLM LOAD REPORT from: ceselder/qwen3-8b-ao-v3-best\nKey | Status |\n"
+    placeholder = "model.layers.{0...35}.self_attn.v_proj.lora_A.default.weight | MISSING | \n"
+    oracle = "model.layers.{0...35}.self_attn.v_proj.lora_A.oracle.weight | MISSING | \n"
+    notes = "Notes:\n- MISSING:\tthose params were newly initialized"
+    assert aobench._is_placeholder_adapter_report(header + placeholder * 4 + notes)
+    assert not aobench._is_placeholder_adapter_report(header + placeholder + oracle + notes)
+    assert not aobench._is_placeholder_adapter_report(
+        header + "model.layers.0.mlp.weight | UNEXPECTED | \n" + notes
+    )
+    assert not aobench._is_placeholder_adapter_report("`torch_dtype` is deprecated!")

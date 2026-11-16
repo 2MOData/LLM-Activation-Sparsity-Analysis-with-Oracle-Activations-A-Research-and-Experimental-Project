@@ -16,8 +16,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import difflib
 import importlib
 import json
+import logging
 import math
 import os
 import random
@@ -78,7 +80,41 @@ def install_aobench(dest: str | Path = "/content/aobench") -> Path:
         os.environ["JUDGE_USE_LOCAL"] = "0"
     os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    _hide_placeholder_adapter_reports()
     return dest
+
+
+def _is_placeholder_adapter_report(message: str) -> bool:
+    """True for the report transformers prints each time the oracle's LoRA is loaded.
+
+    AObench adds an empty adapter named "default" to the model. Loading the oracle then reports
+    the weights of "default" as missing from the oracle's checkpoint, which is expected. Reports
+    that mention anything else are kept.
+    """
+    if "LOAD REPORT" not in message:
+        return False
+    statuses = ("MISSING", "UNEXPECTED", "MISMATCH", "CONVERSION")
+    rows = [
+        line for line in message.splitlines() if "|" in line and any(s in line for s in statuses)
+    ]
+    return bool(rows) and all("MISSING" in row and ".default." in row for row in rows)
+
+
+class _PlaceholderAdapterReportFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not _is_placeholder_adapter_report(record.getMessage())
+
+
+_report_filter = _PlaceholderAdapterReportFilter()
+
+
+def _hide_placeholder_adapter_reports() -> None:
+    """Keeps the report above out of the notebook: it is printed once per (window, eval)."""
+    from transformers.utils import logging as transformers_logging
+
+    transformers_logging.get_logger()  # makes transformers set up its log handler
+    for handler in logging.getLogger("transformers").handlers:
+        handler.addFilter(_report_filter)  # adding the same filter twice has no effect
 
 
 def judge_available() -> bool:
@@ -112,6 +148,53 @@ def parse_judge_answer(text: str) -> dict:
     if not set(fields) - {"reasoning"}:
         raise json.JSONDecodeError("No verdict found in the judge's answer", text, 0)
     return fields
+
+
+_CATEGORY_LIST = re.compile(r"<one of: ([^>]+)>")
+
+
+def snap_category(category, prompt: str):
+    """`category` with its spelling corrected to the closest category the prompt allows.
+
+    The judge sometimes misspells a category ("divergent_meanful"), and AObench counts any
+    unknown category as a failure. Left as it is when the prompt lists no categories or none
+    of them is close.
+    """
+    listed = _CATEGORY_LIST.search(prompt)
+    if not isinstance(category, str) or listed is None:
+        return category
+    allowed = [name.strip() for name in listed.group(1).split(",")]
+    close = difflib.get_close_matches(category.strip().lower(), allowed, n=1, cutoff=0.8)
+    return close[0] if close else category
+
+
+# Added to AObench's hallucination rubric, see `clarify_hallucination_rubric`
+HALLUCINATION_CLARIFICATION = (
+    "Important: a response about the same topic as the actual problem, for example the same "
+    "kind of problem with different numbers, objects or constraints, is plausible_but_wrong, "
+    "not obviously_wrong. Use obviously_wrong only when the topic itself is unrelated to the "
+    "actual problem."
+)
+
+
+def clarify_hallucination_rubric() -> None:
+    """Adds `HALLUCINATION_CLARIFICATION` to the judge prompt of the hallucination eval.
+
+    AObench's rubric already says that the right topic with wrong details is "plausible but
+    wrong" and that "obviously wrong" is for an unrelated topic. Qwen3-14B and Qwen3-32B both
+    ignored that line and called about three quarters of the same-topic answers "obviously
+    wrong", which roughly halved the score. The sentence restates the rule; it is our only
+    change to AObench's judge prompts.
+    """
+    import AObench.open_ended_eval.hallucination as hallucination
+
+    marker = "\n\nRespond with ONLY a JSON object"
+    prompt = hallucination.JUDGE_SYSTEM_PROMPT
+    if HALLUCINATION_CLARIFICATION not in prompt:
+        assert prompt.count(marker) == 1, "AObench's hallucination rubric changed: check it"
+        hallucination.JUDGE_SYSTEM_PROMPT = prompt.replace(
+            marker, f"\n\n{HALLUCINATION_CLARIFICATION}{marker}"
+        )
 
 
 class LocalJudge:
@@ -158,10 +241,13 @@ class LocalJudge:
                 loop.call_soon(self._flush)
             await future
         try:
-            return parse_judge_answer(self.answers[prompt])
+            answer = parse_judge_answer(self.answers[prompt])
         except json.JSONDecodeError:
             self.unparsed.add(prompt)
             raise
+        if "category" in answer:
+            answer["category"] = snap_category(answer["category"], prompt)
+        return answer
 
     def _flush(self) -> None:
         pending, self._pending = self._pending, []
@@ -568,6 +654,8 @@ def run_sweep(
     )
     if judge_now and any(name in JUDGE_EVALS for name in evals):
         settings["judge_model"] = _check_judge(previous)
+        settings["judge_prompt_changes"] = _JUDGE_PROMPT_CHANGES
+        clarify_hallucination_rubric()
     settings_path.write_text(json.dumps(previous | settings, indent=2))
 
     tasks = [(start, name) for start in starts for name in evals]
@@ -630,7 +718,16 @@ def _check_judge(previous_settings: dict) -> str:
         f"This folder was graded by {graded_by}, not {judge_model}. Grades from two judges must "
         "not be mixed: copy the folder, or call judge_sweep(..., rejudge=True) to regrade it all"
     )
+    same_prompts = previous_settings.get("judge_prompt_changes") == _JUDGE_PROMPT_CHANGES
+    assert graded_by is None or same_prompts, (
+        "This folder was graded with other judge prompts. Grades must not be mixed: copy the "
+        "folder, or call judge_sweep(..., rejudge=True) to regrade it all"
+    )
     return judge_model
+
+
+# Recorded in sweep_settings.json next to the judge's name
+_JUDGE_PROMPT_CHANGES = {"hallucination": HALLUCINATION_CLARIFICATION}
 
 
 class _NoModel:
@@ -669,7 +766,9 @@ def judge_sweep(
     settings_path = output_dir / "sweep_settings.json"
     settings = json.loads(settings_path.read_text())
     settings["judge_model"] = _check_judge({} if rejudge else settings)
+    settings["judge_prompt_changes"] = _JUDGE_PROMPT_CHANGES
     settings_path.write_text(json.dumps(settings, indent=2))
+    clarify_hallucination_rubric()
     tokenizer = load_tokenizer(MODEL_NAME)
 
     tasks = [

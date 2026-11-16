@@ -16,10 +16,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import importlib
 import json
 import math
 import os
 import random
+import re
 import subprocess
 import sys
 import time
@@ -86,6 +88,32 @@ def judge_available() -> bool:
     )
 
 
+_JUDGE_FIELD = re.compile(r'"(\w+)"\s*:\s*(?:(-?\d+(?:\.\d+)?)|"((?:[^"\\]|\\.)*))')
+
+
+def parse_judge_answer(text: str) -> dict:
+    """The judge's JSON answer as a dict, even when the JSON is cut off or badly escaped.
+
+    The verdict ("category", or the grades) comes before the free-text "reasoning", so it can
+    still be read field by field from an answer that stops mid-sentence or contains a LaTeX
+    backslash. Raises json.JSONDecodeError if no verdict can be read.
+    """
+    try:
+        payload = json.loads(text[text.index("{") : text.rindex("}") + 1])
+        if isinstance(payload, dict):
+            return payload
+    except ValueError:
+        pass
+    fields: dict = {}
+    for key, number, string in _JUDGE_FIELD.findall(text):
+        fields.setdefault(
+            key, (float(number) if "." in number else int(number)) if number else string
+        )
+    if not set(fields) - {"reasoning"}:
+        raise json.JSONDecodeError("No verdict found in the judge's answer", text, 0)
+    return fields
+
+
 class LocalJudge:
     """An open-weights chat model on our own GPU, standing in for AObench's API judge.
 
@@ -115,13 +143,11 @@ class LocalJudge:
         )
         self.model.eval()
         self.answers: dict[str, str] = {}  # prompt -> raw answer, so a retry costs nothing
-        self.unparsed: set[str] = set()  # prompts whose answer was not valid JSON
+        self.unparsed: set[str] = set()  # prompts whose answer held no readable verdict
         self._pending: list[tuple[str, int, asyncio.Future]] = []
 
     async def __call__(self, *, messages, max_tokens, **_unused) -> dict:
         """Same contract as AObench's `_call_chat_completions`: returns the parsed JSON answer."""
-        from AObench.open_ended_eval.judge import _extract_json_payload
-
         prompt = messages[-1]["content"]
         if prompt not in self.answers:
             loop = asyncio.get_running_loop()
@@ -132,7 +158,7 @@ class LocalJudge:
                 loop.call_soon(self._flush)
             await future
         try:
-            return _extract_json_payload(self.answers[prompt])
+            return parse_judge_answer(self.answers[prompt])
         except json.JSONDecodeError:
             self.unparsed.add(prompt)
             raise
@@ -141,7 +167,8 @@ class LocalJudge:
         pending, self._pending = self._pending, []
         try:
             prompts = sorted({prompt for prompt, _, _ in pending}, key=len)
-            max_new_tokens = max(max_tokens for _, max_tokens, _ in pending)
+            # AObench asks for 120 tokens, which often cuts the reasoning before the JSON closes
+            max_new_tokens = max(256, *(max_tokens for _, max_tokens, _ in pending))
             for i in range(0, len(prompts), self.batch_size):
                 self._generate(prompts[i : i + self.batch_size], max_new_tokens)
         except Exception as error:
@@ -196,12 +223,12 @@ def use_local_judge(
     os.environ["JUDGE_USE_LOCAL"] = "1"  # AObench's name for "the non-Anthropic endpoint"
     os.environ["JUDGE_USE_ANTHROPIC"] = "0"
     os.environ["JUDGE_MODEL"] = model_name
+    # The evals copied the judge's name when they were imported: update it so the logs name ours
+    for module_name in ("judge", *JUDGE_EVALS, "system_prompt_qa"):
+        module = importlib.import_module(f"AObench.open_ended_eval.{module_name}")
+        if hasattr(module, "JUDGE_MODEL"):
+            module.JUDGE_MODEL = model_name
     return _local_judge
-
-
-def default_evals() -> list[str]:
-    """All the evals of the aggregate score, or only the judge-free ones if there is no key."""
-    return list(OBJECTIVE_EVALS + JUDGE_EVALS if judge_available() else OBJECTIVE_EVALS)
 
 
 def load_model_and_tokenizer(model_name: str = MODEL_NAME):
@@ -421,66 +448,42 @@ def estimate_remaining_seconds(
     )
 
 
-def run_sweep(
-    model,
-    tokenizer,
-    starts: list[int],
-    output_dir: str | Path,
-    evals: list[str] | None = None,
-    oracle_lora: str = ORACLE_LORA,
-    n_positions: int | None = None,
-    sample_limits: dict[str, int] | None = None,
-    prompt_layers: str = "actual",
-    target_activations: str = "base",
-) -> None:
-    """Runs AObench once per window, one eval at a time, with a progress bar and an ETA.
+def _raw_path(output_dir: str | Path, start: int, eval_name: str) -> Path:
+    return window_dir(output_dir, start) / "raw" / f"{eval_name}.json"
 
-    Each (window, eval) writes `<output_dir>/window_AA-BB/<eval>_summary.json` when it finishes
-    and is skipped if that file exists: rerun the same call to resume after a disconnection. An
-    eval that crashes is reported and skipped, and retried on the next call. AObench's own output
-    goes to `window_AA-BB/log.txt`.
+
+def _is_judged(output_dir: str | Path, start: int, eval_name: str) -> bool:
+    path = _summary_path(output_dir, start, eval_name)
+    return path.exists() and not json.loads(path.read_text()).get("raw_only", False)
+
+
+@contextlib.contextmanager
+def _environment(**variables: str):
+    previous = {name: os.environ.get(name) for name in variables}
+    os.environ.update(variables)
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def _run_tasks(todo: list[tuple[int, str]], n_done: int, durations, run_one, output_dir, desc):
+    """Runs `run_one(start, eval, directory)` for each task, with the progress bar and the ETA.
+
+    Each task runs in a worker thread with AObench's output sent to the window's log.txt.
+    A task that crashes is reported and skipped.
     """
-    import torch
-    from AObench.open_ended_eval.run_all import run_all_evals
     from tqdm.auto import tqdm
-
-    evals = list(evals) if evals is not None else default_evals()
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    settings = {
-        "oracle_lora": oracle_lora,
-        "evals": evals,
-        "n_positions": n_positions,
-        "sample_limits": sample_limits,
-        "prompt_layers": prompt_layers,
-        "target_activations": target_activations,
-        "aobench_commit": AOBENCH_COMMIT,
-        "judge_model": os.environ.get("JUDGE_MODEL", "claude-sonnet-4-6"),
-    }
-    settings_path = output_dir / "sweep_settings.json"
-    if settings_path.exists():
-        previous = json.loads(settings_path.read_text())
-        changed = {k for k in settings if k != "evals" and settings[k] != previous.get(k)}
-        assert not changed, (
-            f"{output_dir} holds results obtained with other settings ({sorted(changed)}): "
-            "use another output_dir"
-        )
-    settings_path.write_text(json.dumps(settings, indent=2))
-
-    tasks = [(start, name) for start in starts for name in evals]
-    todo = [task for task in tasks if not _summary_path(output_dir, *task).exists()]
-    # Durations of the tasks already done (AObench stores them), so the ETA survives a resume
-    durations: dict[str, list[float]] = {}
-    for start, name in tasks:
-        path = _summary_path(output_dir, start, name)
-        if path.exists():
-            durations.setdefault(name, []).append(json.loads(path.read_text())["elapsed_seconds"])
 
     failures = []
     bar = tqdm(
-        total=len(tasks),
-        initial=len(tasks) - len(todo),
-        desc="AObench sweep",
+        total=n_done + len(todo),
+        initial=n_done,
+        desc=desc,
         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} evals [{elapsed} elapsed] {postfix}",
     )
     for index, (start, name) in enumerate(todo):
@@ -492,35 +495,17 @@ def run_sweep(
         )
         directory = window_dir(output_dir, start)
         directory.mkdir(parents=True, exist_ok=True)
-
-        def run(layers=layers, name=name, directory=directory):
-            random.seed(42)
-            torch.manual_seed(42)
-            with shifted_window(layers, prompt_layers, target_activations):
-                run_all_evals(
-                    model=model,
-                    tokenizer=tokenizer,
-                    device=model.device,
-                    model_name=MODEL_NAME,
-                    output_dir=str(directory),
-                    verbalizer_lora_paths=[oracle_lora],
-                    include=[name],
-                    n_positions=n_positions,
-                    sample_limits=sample_limits,
-                )
-
         started = time.perf_counter()
         with open(directory / "log.txt", "a") as log:
             try:
                 with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
-                    _in_thread(run)
+                    _in_thread(lambda: run_one(start, name, directory))  # noqa: B023
+                durations.setdefault(name, []).append(time.perf_counter() - started)
             except Exception:
                 log.write(traceback.format_exc())
                 failures.append((layers, name))
                 error = traceback.format_exc().strip().splitlines()[-1]
                 bar.write(f"FAILED layers {layers[0]}-{layers[-1]}, {name}: {error}")
-        if _summary_path(output_dir, start, name).exists():
-            durations.setdefault(name, []).append(time.perf_counter() - started)
         bar.update(1)
     bar.set_postfix_str("done" if not failures else f"{len(failures)} evals failed")
     bar.close()
@@ -529,8 +514,205 @@ def run_sweep(
     if _local_judge is not None and _local_judge.answers:
         print(
             f"Local judge: {len(_local_judge.unparsed)} of {len(_local_judge.answers)} answers "
-            "were not valid JSON; AObench leaves those examples out of the scores."
+            "held no readable verdict; AObench leaves those examples out of the scores."
         )
+
+
+def run_sweep(
+    model,
+    tokenizer,
+    starts: list[int],
+    output_dir: str | Path,
+    evals: list[str] | None = None,
+    oracle_lora: str = ORACLE_LORA,
+    n_positions: int | None = None,
+    sample_limits: dict[str, int] | None = None,
+    prompt_layers: str = "actual",
+    target_activations: str = "base",
+    judge_now: bool | None = None,
+) -> None:
+    """Runs AObench once per window, one eval at a time, with a progress bar and an ETA.
+
+    Each (window, eval) writes `<output_dir>/window_AA-BB/<eval>_summary.json` when it finishes
+    and is skipped if that file exists: rerun the same call to resume after a disconnection. An
+    eval that crashes is reported and skipped, and retried on the next call. AObench's own output
+    goes to `window_AA-BB/log.txt`.
+
+    judge_now: whether the judged evals are graded as soon as the oracle has answered. Defaults
+        to True if a judge is set up. With False, only Qwen3-8B and the oracle are needed: the
+        oracle's answers are saved and `judge_sweep` grades them later, possibly on another
+        machine. The answers are saved in `window_AA-BB/raw/` in both cases.
+    """
+    import torch
+    from AObench.open_ended_eval.run_all import run_all_evals
+
+    if judge_now is None:
+        judge_now = judge_available()
+    evals = list(evals) if evals is not None else list(OBJECTIVE_EVALS + JUDGE_EVALS)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    settings = {
+        "oracle_lora": oracle_lora,
+        "n_positions": n_positions,
+        "sample_limits": sample_limits,
+        "prompt_layers": prompt_layers,
+        "target_activations": target_activations,
+        "aobench_commit": AOBENCH_COMMIT,
+    }
+    settings_path = output_dir / "sweep_settings.json"
+    previous = json.loads(settings_path.read_text()) if settings_path.exists() else {}
+    changed = {k for k in settings if previous and settings[k] != previous.get(k)}
+    assert not changed, (
+        f"{output_dir} holds results obtained with other settings ({sorted(changed)}): "
+        "use another output_dir"
+    )
+    if judge_now and any(name in JUDGE_EVALS for name in evals):
+        settings["judge_model"] = _check_judge(previous)
+    settings_path.write_text(json.dumps(previous | settings, indent=2))
+
+    tasks = [(start, name) for start in starts for name in evals]
+    todo = [task for task in tasks if not _summary_path(output_dir, *task).exists()]
+    # Durations of the tasks already done (AObench stores them), so the ETA survives a resume
+    durations: dict[str, list[float]] = {}
+    for start, name in tasks:
+        path = _summary_path(output_dir, start, name)
+        if path.exists():
+            durations.setdefault(name, []).append(json.loads(path.read_text())["elapsed_seconds"])
+
+    def run_one(start, name, directory):
+        import AObench.base_experiment as base_experiment
+
+        random.seed(42)
+        torch.manual_seed(42)
+        original = base_experiment.run_verbalizer
+        calls = []
+
+        def recording_run_verbalizer(*args, **kwargs):
+            results = original(*args, **kwargs)
+            calls.append(
+                [dataclasses.asdict(result) | {"context_token_ids": []} for result in results]
+            )
+            return results
+
+        base_experiment.run_verbalizer = recording_run_verbalizer
+        try:
+            with shifted_window(window_layers(start), prompt_layers, target_activations):
+                with _environment(AOBENCH_SAVE_RAW_ONLY="0" if judge_now else "1"):
+                    run_all_evals(
+                        model=model,
+                        tokenizer=tokenizer,
+                        device=model.device,
+                        model_name=MODEL_NAME,
+                        output_dir=str(directory),
+                        verbalizer_lora_paths=[oracle_lora],
+                        include=[name],
+                        n_positions=n_positions,
+                        sample_limits=sample_limits,
+                    )
+        finally:
+            base_experiment.run_verbalizer = original
+        if name in JUDGE_EVALS:
+            raw_path = _raw_path(output_dir, start, name)
+            raw_path.parent.mkdir(exist_ok=True)
+            raw_path.write_text(json.dumps(calls))
+
+    _run_tasks(todo, len(tasks) - len(todo), durations, run_one, output_dir, "AObench sweep")
+    if not judge_now:
+        print("The judged evals hold the oracle's answers only: grade them with judge_sweep.")
+
+
+def _check_judge(previous_settings: dict) -> str:
+    """Name of the judge in use, after checking it is the one that graded this folder so far."""
+    assert judge_available(), "No judge: call use_local_judge first"
+    judge_model = os.environ.get("JUDGE_MODEL", "claude-sonnet-4-6")
+    graded_by = previous_settings.get("judge_model")
+    assert graded_by in (None, judge_model), (
+        f"This folder was graded by {graded_by}, not {judge_model}. Grades from two judges must "
+        "not be mixed: copy the folder, or call judge_sweep(..., rejudge=True) to regrade it all"
+    )
+    return judge_model
+
+
+class _NoModel:
+    """Stands in for Qwen3-8B when grading saved answers: AObench only touches its adapters."""
+
+    peft_config = {"default": None}
+
+    def eval(self):
+        return self
+
+    def load_adapter(self, *args, **kwargs):
+        pass
+
+    def delete_adapter(self, *args, **kwargs):
+        pass
+
+
+def judge_sweep(
+    output_dir: str | Path,
+    starts: list[int] | None = None,
+    rejudge: bool = False,
+) -> None:
+    """Grades the oracle's answers saved by `run_sweep`, without Qwen3-8B or the oracle.
+
+    Each judged eval is replayed through AObench with the saved answers in place of the
+    generation, so the prompts, the grading and the metrics are AObench's own. Only the judge is
+    needed on the GPU (see `use_local_judge`). Like `run_sweep`, it resumes where it stopped.
+
+    rejudge: grade again what was already graded, for instance with another judge.
+    """
+    import AObench.base_experiment as base_experiment
+    from AObench.open_ended_eval.run_all import run_all_evals
+    from AObench.utils.common import load_tokenizer
+
+    output_dir = Path(output_dir)
+    settings_path = output_dir / "sweep_settings.json"
+    settings = json.loads(settings_path.read_text())
+    settings["judge_model"] = _check_judge({} if rejudge else settings)
+    settings_path.write_text(json.dumps(settings, indent=2))
+    tokenizer = load_tokenizer(MODEL_NAME)
+
+    tasks = [
+        (int(raw.parent.parent.name.split("_")[1].split("-")[0]), raw.stem)
+        for raw in sorted(output_dir.glob("window_*/raw/*.json"))
+    ]
+    tasks = [task for task in tasks if starts is None or task[0] in starts]
+    if starts is not None:
+        tasks.sort(key=lambda task: starts.index(task[0]))
+    todo = [task for task in tasks if rejudge or not _is_judged(output_dir, *task)]
+
+    def run_one(start, name, directory):
+        saved_calls = json.loads(_raw_path(output_dir, start, name).read_text())
+        original = base_experiment.run_verbalizer
+
+        def replayed_run_verbalizer(*args, verbalizer_prompt_infos, **kwargs):
+            saved = saved_calls.pop(0)
+            asked = [info.verbalizer_prompt for info in verbalizer_prompt_infos]
+            assert asked == [
+                result["verbalizer_prompt"] for result in saved
+            ], "the saved answers do not match this eval's questions"
+            return [base_experiment.VerbalizerResults(**result) for result in saved]
+
+        base_experiment.run_verbalizer = replayed_run_verbalizer
+        try:
+            layers = window_layers(start)
+            with shifted_window(layers, settings["prompt_layers"], settings["target_activations"]):
+                with _environment(AOBENCH_SAVE_RAW_ONLY="0"):
+                    run_all_evals(
+                        model=_NoModel(),
+                        tokenizer=tokenizer,
+                        device="cpu",
+                        model_name=MODEL_NAME,
+                        output_dir=str(directory),
+                        verbalizer_lora_paths=[settings["oracle_lora"]],
+                        include=[name],
+                        n_positions=settings["n_positions"],
+                        sample_limits=settings["sample_limits"],
+                    )
+        finally:
+            base_experiment.run_verbalizer = original
+
+    _run_tasks(todo, len(tasks) - len(todo), {}, run_one, output_dir, "AObench judging")
 
 
 # ---------------------------------------------------------------------------
@@ -538,8 +720,14 @@ def run_sweep(
 # ---------------------------------------------------------------------------
 
 
+def window_minutes(output_dir: str | Path, start: int) -> float:
+    """Minutes the evals of a window took, all phases included."""
+    summaries = window_dir(output_dir, start).glob("*_summary.json")
+    return sum(json.loads(path.read_text())["elapsed_seconds"] for path in summaries) / 60
+
+
 def collect_results(output_dir: str | Path, starts: list[int] | None = None):
-    """One row per finished (window, eval).
+    """One row per finished (window, eval). Judged evals appear once they have been graded.
 
     score: the eval's own metric (ROC AUC, exact-match rate, mean judge grade, ...).
     normalized: the same on the 0-1 scale of the paper's aggregate score, where 0 is chance

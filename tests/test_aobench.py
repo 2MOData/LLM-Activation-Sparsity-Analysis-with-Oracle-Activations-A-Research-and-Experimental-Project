@@ -1,3 +1,7 @@
+import json
+
+import pytest
+
 from procom.oracle import aobench
 
 
@@ -36,3 +40,24 @@ def test_eta_uses_per_eval_durations_and_a_fallback():
     remaining = [(21, "a"), (21, "b"), (21, "c")]
     assert aobench.estimate_remaining_seconds(remaining, durations) == 150 + 50 + 350 / 3
     assert aobench.estimate_remaining_seconds(remaining, {}) is None
+
+
+def test_judge_answer_is_read_even_when_truncated_or_badly_escaped():
+    parse = aobench.parse_judge_answer
+    assert parse('{"category": "vague", "reasoning": "ok"}') == {
+        "category": "vague",
+        "reasoning": "ok",
+    }
+    assert (
+        parse('{"category": "correct", "reasoning": "The answer stops he')["category"] == "correct"
+    )
+    truncated = parse('{"specificity": 4, "correctness": 1, "reasoning": "It mentions')
+    assert (truncated["specificity"], truncated["correctness"]) == (4, 1)
+    assert (
+        parse('{"category": "generic", "reasoning": "uses \\frac{1}{2} and $7^{999}$"}')["category"]
+        == "generic"
+    )
+    with pytest.raises(json.JSONDecodeError):
+        parse('{"reasoning": "no verdict before the cut')
+    with pytest.raises(json.JSONDecodeError):
+        parse("I cannot grade this.")

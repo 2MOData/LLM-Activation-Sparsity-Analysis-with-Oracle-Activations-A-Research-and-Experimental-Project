@@ -27,15 +27,12 @@
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-.}"
 
-# Model weights and packages go to the shared /Brain disk, not to the 20 GB home quota
-export HF_HOME=${HF_HOME:-/Brain/private/ProCom-AO/cache/huggingface}
-export UV_CACHE_DIR=${UV_CACHE_DIR:-/Brain/private/ProCom-AO/cache/uv}
-# If the compute nodes have no internet: run `--prepare` on the login node first (see the script)
-# and submit with `export HF_HUB_OFFLINE=1` in your terminal.
-
-# The job's shell does not read ~/.bashrc, so uv (installed in ~/.local/bin) may not be on PATH
-export PATH="$HOME/.local/bin:$PATH"
-command -v uv >/dev/null || { echo "uv not found: install it on the login node (see README)"; exit 1; }
+# uv, its Python and the caches are on /Brain: a job cannot read the home folder
+source scripts/slurm/cluster_env.sh
+# Anything else that writes to ~ (matplotlib, torch, ...) gets a home folder on /Brain too
+export HOME="$PROCOM_DIR/jobhome/$USER"
+mkdir -p "$HOME"
+command -v uv >/dev/null || { echo "uv not found in $PROCOM_DIR/tools/bin"; exit 1; }
 
 echo "Job $SLURM_JOB_ID on $(hostname), started $(date)"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv

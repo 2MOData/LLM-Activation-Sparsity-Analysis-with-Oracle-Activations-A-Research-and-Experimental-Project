@@ -33,6 +33,10 @@ export UV_CACHE_DIR=${UV_CACHE_DIR:-/Brain/private/ProCom-AO/cache/uv}
 # If the compute nodes have no internet: run `--prepare` on the login node first (see the script)
 # and submit with `export HF_HUB_OFFLINE=1` in your terminal.
 
+# The job's shell does not read ~/.bashrc, so uv (installed in ~/.local/bin) may not be on PATH
+export PATH="$HOME/.local/bin:$PATH"
+command -v uv >/dev/null || { echo "uv not found: install it on the login node (see README)"; exit 1; }
+
 echo "Job $SLURM_JOB_ID on $(hostname), started $(date)"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
 

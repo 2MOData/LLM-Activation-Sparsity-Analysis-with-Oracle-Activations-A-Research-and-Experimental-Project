@@ -1,0 +1,5 @@
+# Created by the analysis scripts
+scripts/*.pkl
+scripts/boot.npy
+# Raw outputs of the sweep: download them here (see README.md)
+raw/

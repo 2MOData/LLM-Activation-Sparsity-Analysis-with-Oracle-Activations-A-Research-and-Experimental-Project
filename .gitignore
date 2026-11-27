@@ -11,6 +11,8 @@ __pycache__/
 data/*
 !data/README.md
 activations/
+# ...but not the code package of the same name
+!src/procom/activations/
 outputs/
 runs/
 checkpoints/

@@ -503,6 +503,84 @@ def ask_oracle(
             return _in_thread(run)
 
 
+def ask_oracle_about_activations(
+    model,
+    tokenizer,
+    acts,
+    question: str,
+    layers: list[int] | None = None,
+    max_new_tokens: int = 64,
+    oracle_lora: str = ORACLE_LORA,
+) -> str:
+    """Asks the oracle `question` about activations given as tensors, e.g. loaded from a file.
+
+    acts: layer -> (n_positions, d_model), with the same positions for every layer, as saved by
+        `procom.activations.save_activations` (`load_activations(...).acts`).
+    layers: the window to give the oracle, 5 layers in order (default: the trained window).
+
+    Same as `ask_oracle` with the "actual" layer names, except that the activations are not
+    read from the model: the oracle's prompt, the injection and the generation all go through
+    AObench's own code. Given the activations `ask_oracle` reads, it gives the same answer.
+    """
+    import AObench.base_experiment as base_experiment
+    import AObench.open_ended_eval.eval_runner as eval_runner
+    import AObench.utils.dataset_utils as dataset_utils
+    import torch
+    from AObench.utils.activation_utils import get_hf_submodule
+    from AObench.utils.eval import run_evaluation
+
+    layers = list(TRAINED_WINDOW if layers is None else layers)
+    missing = [layer for layer in layers if layer not in acts]
+    assert not missing, f"no activations for layers {missing}"
+    vectors = [acts[layer] for layer in layers]
+    n_positions = len(vectors[0])
+    assert all(len(v) == n_positions for v in vectors), "every layer needs the same positions"
+
+    def run():
+        eval_runner.ensure_default_adapter(model)
+        with shifted_window(layers, prompt_layers="actual"):
+            adapter, training_config = base_experiment.load_oracle_adapter(model, oracle_lora)
+            config = eval_runner.build_verbalizer_eval_config(
+                model_name=MODEL_NAME,
+                training_config=training_config,
+                eval_batch_size=1,
+                generation_kwargs={"do_sample": False, "max_new_tokens": max_new_tokens},
+            )
+            # One datapoint, built as `run_verbalizer` builds it: the vectors of each layer of
+            # the window one after the other, under the "Layer: N" lines of the oracle's prompt
+            datapoint = dataset_utils.create_training_datapoint(
+                datapoint_type="N/A",
+                prompt=question,
+                target_response="N/A",
+                layers=config.selected_act_layers,
+                num_positions=n_positions,
+                tokenizer=tokenizer,
+                acts_BD=torch.cat(vectors, dim=0),
+                feature_idx=-1,
+                special_token=config.special_token,
+                prefix_template=config.prefix_template,
+            )
+            model.set_adapter(adapter)
+            results = run_evaluation(
+                eval_data=[datapoint],
+                model=model,
+                tokenizer=tokenizer,
+                submodule=get_hf_submodule(model, config.injection_layer),
+                device=model.device,
+                dtype=torch.bfloat16,  # as in AObench's run_verbalizer
+                global_step=-1,
+                lora_path=adapter,
+                eval_batch_size=1,
+                steering_coefficient=config.steering_coefficient,
+                generation_kwargs=config.verbalizer_generation_kwargs,
+            )
+        return results[0].api_response
+
+    with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+        with contextlib.redirect_stderr(devnull):
+            return _in_thread(run)
+
+
 def window_dir(output_dir: str | Path, start: int) -> Path:
     layers = window_layers(start)
     return Path(output_dir) / f"window_{layers[0]:02d}-{layers[-1]:02d}"

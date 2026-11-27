@@ -18,7 +18,7 @@ Dépôt : https://github.com/2MOData/LLM-Activation-Sparsity-Analysis-with-Oracl
 | `scripts/aobench_layer_sweep.py` + `scripts/slurm/` | exp. 1 sur cluster | modèle de script : argparse, `--limit`, `--prepare`, reprise |
 | `notebooks/tutorial_colab_oracle.ipynb` | tuto Colab, **gabarit de style des notebooks** | anglais, badge Colab, §0 Setup identique, hooks retirés dans `finally` |
 | `notebooks/aobench_layer_window_sweep.ipynb` | exp. 1 en notebook | = script ci-dessus |
-| `notebooks/sparsity_rates_teal_wina.ipynb` | sparsité réalisée TEAL / WINA | voir §3 ; code dans le notebook, pas encore dans `src/` |
+| `notebooks/sparsity_rates_teal_wina.ipynb` | démonstrateur : lire la sparsité réalisée TEAL / WINA sur 2 exemples | voir §3 ; `neuron_scores`, `calibrate_thresholds`, `run_sparse` |
 | `results/aobench_layer_sweep/` | résultats exp. 1 | `README.md` résume tout, CSV + figures |
 | `tests/` | `test_aobench.py` (utilitaires purs), `test_imports.py` | `uv run pytest` |
 
@@ -129,13 +129,14 @@ Questions à l'oracle pour chaque prompt : Q1 description libre (« Can you desc
 - `scripts/aobench_layer_sweep.py` + `scripts/slurm/aobench_layer_sweep.sbatch` : modèle à suivre pour les prochains scripts (argparse, `--limit`, sauvegarde par unité de travail, reprise).
 - `dataset/` et `sparsity/` : **vides** (Raph et Momo). `activations/` : **pas encore créé** (Max et Léo).
 
-### Notebook de sparsité réalisée (`notebooks/sparsity_rates_teal_wina.ipynb`, Momo, branche `feature/sparsity-rate-notebook`)
-- Un **pre-hook sur `mlp.down_proj`** de chaque couche (`sparsify(method, thresholds, record)`) : met à zéro les neurones dont le score < seuil de la couche, enregistre par token la fraction coupée et l'erreur relative de la sortie du FFN.
+### Démonstrateur de sparsité (`notebooks/sparsity_rates_teal_wina.ipynb`, Momo, branche `feature/sparsity-rate-notebook`)
+Démonstrateur basique, niveau du tuto (pas une expérience). Retours équipe du 28/11 appliqués : 8 bits autorisé, pas de calibration par tolérance, 2 exemples seulement.
+- Qwen3-8B en bf16, ou en **8 bits si GPU < 20 Go** (T4), `down_proj` gardé en bf16 (`llm_int8_skip_modules`) car WINA lit ses poids. La quantification déforme un peu les activations : acceptable pour une démo seulement.
 - Scores (`neuron_scores`) : TEAL |a_j|, WINA |a_j|·‖W_down[:, j]‖ (sans rotation).
-- Calibration (`calibrate`) : une passe dense sur 4 096 tokens WikiText-2 train ; par couche, indépendamment, bissection sur le nombre d'entrées coupées → plus grand seuil avec erreur ≤ b, b ∈ {0,02 ; 0,05 ; 0,10 ; 0,20 ; 0,30}.
-- Mesure sur texte non vu (4 × 512 tokens WikiText-2 test + 2 prompts provisoires par thème T1-T6, gabarit de chat), batch 1 (pas de padding). Sorties : sparsité **locale** (par couche, moyenne + p10/p90 sur les tokens), **globale** (moyenne des couches, car même nombre de neurones), erreur réalisée par couche ; figures ; `outputs/sparsity_rates/{thresholds.json, sparsity_per_layer.csv, sparsity_global.csv}`.
-- GPU < 20 Go (T4) : bascule sur Qwen3-4B (+ fp16 sans bf16) pour vérifier le code seulement.
-- Vérifié sur CPU avec un Qwen3 aléatoire minuscule (le pipeline tourne, l'erreur réalisée ≈ b), puis **exécuté en entier sur Colab** (27/11/2026, toutes les cellules passent). Chiffres pas encore reportés ici. Piège Colab : `drive.mount` → « credential propagation was unsuccessful » si toutes les permissions ne sont pas cochées.
+- Seuils (`calibrate_thresholds`) : les papiers ne donnent pas de valeur de seuil, mais une sparsité cible ; comme TEAL, seuil par couche = quantile 50 % des scores sur un court texte générique (TEAL : 40-50 % de sparsité globale sans grosse perte).
+- `run_sparse(messages, method)` : pre-hook sur `mlp.down_proj`, coupe sous le seuil, renvoie `cut[couche, token]`. Affiche sparsité globale, locale par couche, et par token, sur 2 prompts (fait, calcul).
+- Vérifié sur CPU avec un Qwen3 aléatoire minuscule ; **version simplifiée pas encore relancée sur Colab** (la version longue du 27/11 y passait).
+- Écart assumé avec §2 (seuil par tolérance d'erreur b, SATS) : à faire dans `src/procom/sparsity/` pour les vraies expériences.
 
 ### Expérience 1 : où l'oracle sait-il lire ? (terminée, `results/aobench_layer_sweep/`)
 19 fenêtres de 5 couches (13-17 à 31-35), 9 évals AObench complètes, juge Qwen3-32B. 1 A100 80 Go : 6 h 21 de génération, 10 h 24 de notation. Décodage glouton, une passe par fenêtre, IC à 95 % par bootstrap.
@@ -170,7 +171,7 @@ Attention : la présentation S9 parlait d'un « plateau 20-32 » issu d'un pré-
 Priorités immédiates (nov. – déc., S9 à S14) :
 1. **Figer le format des fichiers d'activations** (safetensors, un fichier par thème, une clé par couche) et produire des données factices pour que chacun avance.
 2. **Module `activations/`** : extraction par hooks des couches lues (fenêtres 16-20, 21-25, 26-30), avec enregistrement de v_dense, v_sparse et Δv.
-3. **Module `sparsity/`** : hook commun sur l'entrée de `down_proj`, TEAL puis WINA, calibration des seuils par tolérance d'erreur, masques enregistrables, contrôles (aléatoire, uniforme, bruit). *Prototype du hook, des scores et de la calibration dans `notebooks/sparsity_rates_teal_wina.ipynb` : à déplacer dans `src/procom/sparsity/` (+ tests) ; manquent les masques enregistrés et les contrôles.*
+3. **Module `sparsity/`** : hook commun sur l'entrée de `down_proj`, TEAL puis WINA, calibration des seuils par tolérance d'erreur, masques enregistrables, contrôles (aléatoire, uniforme, bruit). *Hook et scores démontrés dans `notebooks/sparsity_rates_teal_wina.ipynb` (seuils par quantile) : reste à les mettre dans `src/procom/sparsity/` (+ tests) avec la calibration par tolérance, les masques enregistrés et les contrôles.*
 4. **Métriques de sortie** : perplexité, KL dense / sparse, exactitude, sparsité réalisée.
 5. **Module `dataset/`** : générer les 4 thèmes + 2 témoins (+ cas métacognitifs / multi-sauts) et les questions Q1-Q5.
 6. **AObench sur activations coupées**, sur les trois fenêtres retenues, pour mesurer la fiabilité de l'oracle hors distribution.
@@ -182,4 +183,5 @@ Ensuite : passes dense / sparse sur tout le jeu (janvier, revue 2 en S16), puis 
 
 ## 6. Journal (une ligne par push, la plus récente en haut)
 
+- 28/11/2026 · `feature/sparsity-rate-notebook` · notebook simplifié en démonstrateur (8 bits si besoin, seuils = quantile 50 % façon TEAL, 2 exemples ; plus de calibration par tolérance, figures ni sauvegarde).
 - 27/11/2026 · `feature/sparsity-rate-notebook` · ajout `notebooks/sparsity_rates_teal_wina.ipynb` (hook `down_proj`, calibration TEAL/WINA par tolérance, sparsité locale/globale) ; `CONTEXTE.md` versionné, carte §0 + journal §6.

@@ -1,6 +1,6 @@
 # PROCOM : analyser la sparsité d'un LLM avec des Activation Oracles
 
-*Fichier de contexte pour Claude Code, état au 27/11/2026. Peut servir de base à un `CLAUDE.md` à la racine du dépôt. **Mis à jour avant chaque push** : la carte (§0) et le journal (§6) doivent suffire pour savoir quoi ouvrir, sans relire tout le dépôt.*
+*Fichier de contexte pour Claude Code, état au 28/11/2026. Peut servir de base à un `CLAUDE.md` à la racine du dépôt. **Mis à jour avant chaque push** : la carte (§0) et le journal (§6) doivent suffire pour savoir quoi ouvrir, sans relire tout le dépôt.*
 
 Équipe : Léo Beaumont, Maxime Philippon (Max), Mouad Chouki (Momo), Raphaël Azancot (Raph). Encadrant : Bastien Pasdeloup. Fin du projet : mars 2027 (revue 2 en S16, revue 3 en S25).
 
@@ -12,14 +12,16 @@ Dépôt : https://github.com/2MOData/LLM-Activation-Sparsity-Analysis-with-Oracl
 
 | Chemin | Rôle | Symboles clés / à savoir |
 |---|---|---|
-| `src/procom/oracle/aobench.py` | AObench + oracle | `ask_oracle`, `shifted_window`, `run_sweep`/`judge_sweep` (reprise), `LocalJudge`, `collect_results`, `plot_sweep` |
+| `src/procom/oracle/aobench.py` | AObench + oracle | `ask_oracle`, `ask_oracle_about_activations` (activations fournies, ex. lues d'un fichier), `shifted_window`, `run_sweep`/`judge_sweep` (reprise), `LocalJudge`, `collect_results`, `plot_sweep` |
 | `src/procom/{dataset,sparsity}/` | vides (docstrings périmées : « predictors, quantization ») | à remplir |
-| `src/procom/activations/` | vide, **ignoré par Git** (règle `activations/` de `.gitignore`) | corriger la règle en `/activations/` avant d'y coder |
+| `src/procom/activations/` | extraction et enregistrement des activations lues par l'oracle (`saving.py`) | `save_activations`, `load_activations`, `extract_activations`, `adapters_disabled`, `PROJECT_WINDOWS` / `PROJECT_LAYERS` ; format au §2. La règle `activations/` de `.gitignore` (données) a une exception `!src/procom/activations/` |
 | `scripts/aobench_layer_sweep.py` + `scripts/slurm/` | exp. 1 sur cluster | modèle de script : argparse, `--limit`, `--prepare`, reprise |
 | `notebooks/tutorial_colab_oracle.ipynb` | tuto Colab, **gabarit de style des notebooks** | anglais, badge Colab, §0 Setup identique, hooks retirés dans `finally` |
+| `notebooks/tutorial_saving_activations.ipynb` | démo de l'enregistrement des activations + vérification avec l'oracle v3 | voir §3 |
 | `notebooks/aobench_layer_window_sweep.ipynb` | exp. 1 en notebook | = script ci-dessus |
+| `notebooks/sparsity_rates_teal_wina.ipynb` | sparsité réalisée TEAL / WINA | voir §3 ; code dans le notebook, pas encore dans `src/` |
 | `results/aobench_layer_sweep/` | résultats exp. 1 | `README.md` résume tout, CSV + figures |
-| `tests/` | `test_aobench.py` (utilitaires purs), `test_imports.py` | `uv run pytest` |
+| `tests/` | `test_aobench.py` (utilitaires purs), `test_activations.py` (fichiers safetensors, sans modèle), `test_imports.py` | `uv run pytest` |
 
 Sorties locales dans `outputs/` (ignoré par Git).
 
@@ -59,10 +61,11 @@ Une absence de lien entre ce que voit l'oracle et les métriques classiques sera
 ## 2. Les choix techniques figés
 
 ### Modèle cible et oracle
-- **Qwen3-8B** (`Qwen/Qwen3-8B`) : 36 couches, dimension 4 096, FFN SwiGLU de 12 288 neurones (gate, up, down), GQA, modèle dense. En bf16 (~16 Go). **Ne pas charger en 4 ou 8 bits** : la quantification modifie elle-même les activations.
+- **Qwen3-8B** (`Qwen/Qwen3-8B`) : 36 couches, dimension 4 096, FFN SwiGLU de 12 288 neurones (gate, up, down), GQA, modèle dense. En bf16 (~16 Go). **Ne pas charger en 4 ou 8 bits** : la quantification modifie elle-même les activations. Seule exception : les notebooks de démo sur T4, pour vérifier le code (Qwen3-8B en 8 bits dans `tutorial_saving_activations.ipynb`, Qwen3-4B dans `sparsity_rates_teal_wina.ipynb`). `save_activations` refuse un modèle quantifié sauf `allow_quantized=True`, et écrit la quantification dans les métadonnées de chaque fichier.
 - **Oracle** : `ceselder/qwen3-8b-ao-v3-best` (papier *Building Better Activation Oracles*, [arXiv:2606.02609](https://arxiv.org/abs/2606.02609)). Il lit **5 couches consécutives à la fois** et a été entraîné sur les couches **21-25**.
 - L'injection dans l'oracle renormalise le vecteur (h' = h + ‖h‖ · v/‖v‖) : l'oracle ne voit que la **direction** des activations, pas leur norme. Il faut donc aussi mesurer la similarité cosinus dense / sparse.
 - L'oracle et le modèle cible partagent les mêmes poids de base : **le hook de sparsité doit être retiré** (et le LoRA désactivé pour lire la cible) avant le passage de l'oracle.
+- **Lecture des activations (convention d'AObench, reprise par `procom.activations`)** : sortie du bloc `model.model.layers[L]` (= `hidden_states[L + 1]`, pas `hidden_states[L]`), LoRA désactivé (`adapters_disabled` gère `PeftModel` et les adaptateurs ajoutés par `load_adapter`, comme le fait AObench) ; prompt passé par le gabarit de chat sans réflexion, avec l'en-tête assistant ajouté si le dernier message est de l'utilisateur ; l'oracle reçoit les 20 derniers tokens.
 
 ### Benchmark de l'oracle : AObench
 - Dépôt `ceselder/cot-oracle`, commit figé `bec6f8a82c6882faa3a931a88978bd6af0694c27` (cloné par `install_aobench`, pas un paquet pip).
@@ -93,8 +96,12 @@ Réglages décidés :
 
 ### Stockage des activations : safetensors
 Benchmark fait (`benchmark-stockage/`) : même taille et lecture complète que `.pt`, mais lecture d'une seule couche 25× plus rapide qu'un `torch.load` classique, sans pickle.
-- Un fichier par thème (catégorie), une clé par couche : `L07.acts` [N, T, 4096] et `L07.mask` [N, T] (padding + masque).
-- Lecture : `safe_open(...).get_tensor("L07.acts")`.
+- **Un fichier par exemple** (`<id>.safetensors`), pas un fichier par thème : avec 15 couches, un fichier par thème deviendrait énorme. Un fichier par exemple se lit, se copie ou se supprime seul, n'a ni padding ni masque, et un enregistrement interrompu reprend où il s'est arrêté.
+- Clés : `layer_<L>` [n_positions, 4096] (une par couche, dtype du modèle), `input_ids` [n_tokens] (tout le prompt), `positions` [n_positions] (indices dans `input_ids` des lignes gardées). Par défaut les **20 derniers tokens** (`n_last_tokens`, `None` = tous).
+- Métadonnées (chaînes) dans chaque fichier : id, modèle, couches, quantification, dtype, prompt, champs libres de l'exemple (ex. `subject`), versions de torch et transformers. `index.jsonl` liste les exemples du dossier.
+- Taille : ~2,5 Mo par exemple (15 couches × 20 tokens en bf16), ~0,5 Go pour 4 thèmes × 50 exemples.
+- Lecture : `load_activations(path, layers=...)`, qui ne lit que les couches demandées (`safe_open`).
+- Pas encore décidé : où et sous quelle forme ranger v_sparse et Δv.
 - Les activations, données et poids ne vont jamais dans Git (`data/` est local).
 
 ### Jeu de données (proposition du 10/11, à finaliser par Raph et Momo)
@@ -124,9 +131,18 @@ Questions à l'oracle pour chaque prompt : Q1 description libre (« Can you desc
 - **Cluster de l'école (Slurm)** documenté dans `scripts/slurm/README.md` : compte `brain`, partition `Brain_GPU`, `--qos=low`, nœud `sl-mee-br-501` (4 × A100 80 Go), pas de limite de temps mais jobs préemptables (les scripts doivent reprendre où ils se sont arrêtés). Home limité à 20 Go et **illisible par les jobs** : tout vit sur `/Brain/private/ProCom-AO/` (uv, Python, caches HF, repo), chemins fixés par `scripts/slurm/cluster_env.sh`. Télécharger les modèles sur le nœud de login avant (`--prepare`).
 
 ### Code existant (`src/procom/`)
-- `oracle/aobench.py` (~900 lignes, testé dans `tests/test_aobench.py`) : installation d'AObench, juge local (`LocalJudge`, `use_local_judge`), décalage de la fenêtre de couches lue (`shifted_window`), `ask_oracle`, `run_sweep` / `judge_sweep` avec sauvegarde et reprise, `collect_results`, `aggregate_scores`, `plot_sweep`. Un défaut d'AObench sur la lecture des activations a été corrigé (`target_activations="base"` : activations lues avec le LoRA désactivé ; `prompt_layers="actual"`).
+- `oracle/aobench.py` (~900 lignes, testé dans `tests/test_aobench.py`) : installation d'AObench, juge local (`LocalJudge`, `use_local_judge`), décalage de la fenêtre de couches lue (`shifted_window`), `ask_oracle`, `ask_oracle_about_activations`, `run_sweep` / `judge_sweep` avec sauvegarde et reprise, `collect_results`, `aggregate_scores`, `plot_sweep`. Un défaut d'AObench sur la lecture des activations a été corrigé (`target_activations="base"` : activations lues avec le LoRA désactivé ; `prompt_layers="actual"`).
 - `scripts/aobench_layer_sweep.py` + `scripts/slurm/aobench_layer_sweep.sbatch` : modèle à suivre pour les prochains scripts (argparse, `--limit`, sauvegarde par unité de travail, reprise).
-- `dataset/` et `sparsity/` : **vides** (Raph et Momo). `activations/` : **pas encore créé** (Max et Léo).
+- `dataset/` et `sparsity/` : **vides** (Raph et Momo).
+- `activations/` (Max et Léo) : enregistrement des activations, voir « Enregistrement des activations » plus bas.
+
+### Notebook de sparsité réalisée (`notebooks/sparsity_rates_teal_wina.ipynb`, Momo, branche `feature/sparsity-rate-notebook`)
+- Un **pre-hook sur `mlp.down_proj`** de chaque couche (`sparsify(method, thresholds, record)`) : met à zéro les neurones dont le score < seuil de la couche, enregistre par token la fraction coupée et l'erreur relative de la sortie du FFN.
+- Scores (`neuron_scores`) : TEAL |a_j|, WINA |a_j|·‖W_down[:, j]‖ (sans rotation).
+- Calibration (`calibrate`) : une passe dense sur 4 096 tokens WikiText-2 train ; par couche, indépendamment, bissection sur le nombre d'entrées coupées → plus grand seuil avec erreur ≤ b, b ∈ {0,02 ; 0,05 ; 0,10 ; 0,20 ; 0,30}.
+- Mesure sur texte non vu (4 × 512 tokens WikiText-2 test + 2 prompts provisoires par thème T1-T6, gabarit de chat), batch 1 (pas de padding). Sorties : sparsité **locale** (par couche, moyenne + p10/p90 sur les tokens), **globale** (moyenne des couches, car même nombre de neurones), erreur réalisée par couche ; figures ; `outputs/sparsity_rates/{thresholds.json, sparsity_per_layer.csv, sparsity_global.csv}`.
+- GPU < 20 Go (T4) : bascule sur Qwen3-4B (+ fp16 sans bf16) pour vérifier le code seulement.
+- Vérifié sur CPU avec un Qwen3 aléatoire minuscule (le pipeline tourne, l'erreur réalisée ≈ b), puis **exécuté en entier sur Colab** (27/11/2026, toutes les cellules passent). Chiffres pas encore reportés ici. Piège Colab : `drive.mount` → « credential propagation was unsuccessful » si toutes les permissions ne sont pas cochées.
 
 ### Expérience 1 : où l'oracle sait-il lire ? (terminée, `results/aobench_layer_sweep/`)
 19 fenêtres de 5 couches (13-17 à 31-35), 9 évals AObench complètes, juge Qwen3-32B. 1 A100 80 Go : 6 h 21 de génération, 10 h 24 de notation. Décodage glouton, une passe par fenêtre, IC à 95 % par bootstrap.
@@ -145,11 +161,21 @@ Questions à l'oracle pour chaque prompt : Q1 description libre (« Can you desc
 
 Attention : la présentation S9 parlait d'un « plateau 20-32 » issu d'un pré-test à 10 exemples. Le résultat qui fait foi est celui de l'expérience complète ci-dessus. Conséquence pour RQ2 : la fin du réseau (au-delà de la couche 30) est mal lue par l'oracle, il faudra formuler la comparaison « couches médianes vs fin de réseau » avec les fenêtres 16-20 / 21-25 / 26-30, ou la justifier autrement (KL, logit lens).
 
+### Enregistrement des activations (`src/procom/activations/`, Léo, branche `feature/saving_activations`)
+- `save_activations(model, tokenizer, examples, output_dir, layers=PROJECT_LAYERS, n_last_tokens=20)` : forward hooks sur les couches choisies, LoRA désactivé, un fichier par exemple (format au §2). Un exemple est un dict avec `id` (nom du fichier : lettres, chiffres, `_`, `-`, `.`), `prompt` (conversation ou texte brut) et des champs libres (`subject`...). Les fichiers existants sont sautés, après vérification qu'ils ont les mêmes réglages (`overwrite=True` pour refaire) ; écriture atomique (`.tmp` puis renommage). `batch_size=1` par défaut : en bf16, regrouper les prompts peut changer les derniers bits.
+- `PROJECT_WINDOWS` = (16-20, 21-25, 26-30), les fenêtres de l'expérience 1 ; `PROJECT_LAYERS` = leurs 15 couches.
+- `extract_activations` : la même chose en mémoire, sans écrire ; `load_activations`, `read_index`, `read_metadata`.
+- `aobench.ask_oracle_about_activations(model, tokenizer, acts, question, layers)` : interroge l'oracle v3 sur des activations fournies (une fenêtre de 5 couches), par le code d'AObench (prompt `Layer: N` + ` ?`, injection en couche 1). Avec les activations que lit `ask_oracle`, elle donne la même réponse.
+- `notebooks/tutorial_saving_activations.ipynb` (setup du tuto Colab, Qwen3-8B en 8 bits sur T4) : enregistre 4 exemples jouets, inspecte un fichier, vérifie que `layer_L` = `hidden_states[L + 1]`, puis compare pour chaque fenêtre la réponse de l'oracle sur les activations lues par AObench et sur celles du fichier (elles doivent être identiques, décodage glouton).
+- `tests/test_activations.py` : aller-retour safetensors, sous-ensemble de couches, index, ids, désactivation du LoRA ; aucun modèle chargé, les vérifications avec modèle sont dans le notebook.
+- **Exécution complète sur Colab pas encore confirmée.** Critère : le §5 du notebook passe et le §6 affiche `same answer: True` pour les trois fenêtres.
+
 ---
 
 ## 4. Points d'attention
 
 - Le mot « oracle » désigne ici l'**Activation Oracle** (un LLM lecteur). Ne pas le confondre avec l'« oracle top-k » (sélecteur parfait des k meilleurs neurones) qui apparaît dans les anciens fichiers `plan/` et `etat-de-l-art/erreur-minimale-sparse.md`.
+- Deux oracles apparaissent dans le dépôt : celui de Karvonen (une couche à 50 %, dans `tutorial_colab_oracle.ipynb`, tutoriel seulement) et l'oracle v3 (5 couches, via AObench), qui est celui du projet. Les `ask_oracle` du tutoriel et d'`aobench.py` ne sont pas interchangeables.
 - Ces anciens fichiers décrivent une **autre piste** (plancher et plafond de l'erreur d'un LLM sparse, sur GPT-2) qui **n'a pas été retenue**. Seule idée réutilisée : le score |a_j| · ‖w_j‖, qui est celui de WINA.
 - L'oracle n'a jamais vu d'activations coupées : s'il se trompe, est-ce l'information qui manque ou lui qui est hors distribution ? Parades : témoins T5/T6, contrôles aléatoires et bruit, **AObench rejoué sur activations coupées**.
 - Risque principal du planning : la mise en œuvre de la sparsité. Priorité au hook commun et à TEAL.
@@ -159,9 +185,9 @@ Attention : la présentation S9 parlait d'un « plateau 20-32 » issu d'un pré-
 ## 5. Prochaines étapes
 
 Priorités immédiates (nov. – déc., S9 à S14) :
-1. **Figer le format des fichiers d'activations** (safetensors, un fichier par thème, une clé par couche) et produire des données factices pour que chacun avance.
-2. **Module `activations/`** : extraction par hooks des couches lues (fenêtres 16-20, 21-25, 26-30), avec enregistrement de v_dense, v_sparse et Δv.
-3. **Module `sparsity/`** : hook commun sur l'entrée de `down_proj`, TEAL puis WINA, calibration des seuils par tolérance d'erreur, masques enregistrables, contrôles (aléatoire, uniforme, bruit).
+1. **Format des fichiers d'activations : figé** (un fichier par exemple, §2). Reste à produire des données factices pour que chacun avance.
+2. **Module `activations/`** : extraction et enregistrement de v_dense faits (§3). Reste v_sparse et Δv : lancer `save_activations` à l'intérieur du bloc `sparsify(...)` du notebook de sparsité devrait lire le flux résiduel déjà coupé (à vérifier), puis décider où les ranger.
+3. **Module `sparsity/`** : hook commun sur l'entrée de `down_proj`, TEAL puis WINA, calibration des seuils par tolérance d'erreur, masques enregistrables, contrôles (aléatoire, uniforme, bruit). *Prototype du hook, des scores et de la calibration dans `notebooks/sparsity_rates_teal_wina.ipynb` : à déplacer dans `src/procom/sparsity/` (+ tests) ; manquent les masques enregistrés et les contrôles.*
 4. **Métriques de sortie** : perplexité, KL dense / sparse, exactitude, sparsité réalisée.
 5. **Module `dataset/`** : générer les 4 thèmes + 2 témoins (+ cas métacognitifs / multi-sauts) et les questions Q1-Q5.
 6. **AObench sur activations coupées**, sur les trois fenêtres retenues, pour mesurer la fiabilité de l'oracle hors distribution.
@@ -173,4 +199,5 @@ Ensuite : passes dense / sparse sur tout le jeu (janvier, revue 2 en S16), puis 
 
 ## 6. Journal (une ligne par push, la plus récente en haut)
 
-- 27/11/2026 · `main` · `CONTEXTE.md` versionné : carte du dépôt §0 + journal §6.
+- 28/11/2026 · `feature/saving_activations` · module `src/procom/activations/` (safetensors, un fichier par exemple, couches 16-30, 20 derniers tokens), `aobench.ask_oracle_about_activations`, notebook `tutorial_saving_activations.ipynb`, `tests/test_activations.py`, exception dans `.gitignore` ; `CONTEXTE.md` repris de `feature/sparsity-rate-notebook` et mis à jour.
+- 27/11/2026 · `feature/sparsity-rate-notebook` · ajout `notebooks/sparsity_rates_teal_wina.ipynb` (hook `down_proj`, calibration TEAL/WINA par tolérance, sparsité locale/globale) ; `CONTEXTE.md` versionné, carte §0 + journal §6.

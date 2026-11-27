@@ -17,6 +17,7 @@ dependencies = [
     "peft>=0.21.2",
     "torchao>=0.16.0",
     "bitsandbytes>=0.50.2 ; sys_platform != 'darwin'",
+    "httpx>=0.28.1",
 ]
 
 [dependency-groups]

@@ -92,6 +92,7 @@ src/procom/
   dataset/       # prompt themes and questions asked to the oracle (Raph, Momo)
   sparsity/      # sparsity methods: predictors, post-computation cutoff, quantization (Raph, Momo)
 scripts/         # runnable scripts (uv run python scripts/...)
+  slurm/         # jobs for the school GPU cluster: read its README.md first
 notebooks/       # explorations (outputs stripped automatically by nbstripout)
 configs/         # YAML config files for experiments
 tests/           # uv run pytest

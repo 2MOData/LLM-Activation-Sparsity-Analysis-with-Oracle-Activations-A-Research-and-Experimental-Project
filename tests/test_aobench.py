@@ -1,0 +1,90 @@
+import json
+
+import pytest
+
+from procom.oracle import aobench
+
+
+def test_every_layer_has_a_percentage():
+    for layer in range(aobench.N_LAYERS):
+        percent = aobench.layer_to_percent(layer)
+        assert int(aobench.N_LAYERS * (percent / 100)) == layer
+
+
+def test_trained_window_gets_the_paper_percentages():
+    # layer_combinations of ceselder/qwen3-8b-ao-v3-best
+    assert [aobench.layer_to_percent(layer) for layer in aobench.TRAINED_WINDOW] == [
+        59,
+        62,
+        64,
+        67,
+        70,
+    ]
+
+
+def test_schedule_starts_at_the_trained_window_and_moves_outwards():
+    starts = aobench.window_schedule()
+    assert starts[:5] == [21, 20, 22, 19, 23]
+    assert sorted(starts) == list(range(13, 32))
+    assert aobench.window_layers(starts[0]) == list(aobench.TRAINED_WINDOW)
+    assert max(aobench.window_layers(max(starts))) == aobench.N_LAYERS - 1
+
+
+def test_schedule_with_a_stride_keeps_the_trained_window():
+    assert sorted(aobench.window_schedule(stride=2)) == [13, 15, 17, 19, 21, 23, 25, 27, 29, 31]
+    assert sorted(aobench.window_schedule(first_start=14, stride=3)) == [15, 18, 21, 24, 27, 30]
+
+
+def test_eta_uses_per_eval_durations_and_a_fallback():
+    durations = {"a": [100.0, 200.0], "b": [50.0]}
+    remaining = [(21, "a"), (21, "b"), (21, "c")]
+    assert aobench.estimate_remaining_seconds(remaining, durations) == 150 + 50 + 350 / 3
+    assert aobench.estimate_remaining_seconds(remaining, {}) is None
+
+
+def test_judge_answer_is_read_even_when_truncated_or_badly_escaped():
+    parse = aobench.parse_judge_answer
+    assert parse('{"category": "vague", "reasoning": "ok"}') == {
+        "category": "vague",
+        "reasoning": "ok",
+    }
+    assert (
+        parse('{"category": "correct", "reasoning": "The answer stops he')["category"] == "correct"
+    )
+    truncated = parse('{"specificity": 4, "correctness": 1, "reasoning": "It mentions')
+    assert (truncated["specificity"], truncated["correctness"]) == (4, 1)
+    assert (
+        parse('{"category": "generic", "reasoning": "uses \\frac{1}{2} and $7^{999}$"}')["category"]
+        == "generic"
+    )
+    with pytest.raises(json.JSONDecodeError):
+        parse('{"reasoning": "no verdict before the cut')
+    with pytest.raises(json.JSONDecodeError):
+        parse("I cannot grade this.")
+
+
+def test_misspelled_category_snaps_to_the_closest_allowed_one():
+    prompt = (
+        'Respond with ONLY a JSON object: {"category": "<one of: divergent_meaningful, '
+        'divergent_noise, same>", "reasoning": "<brief explanation>"}\n\nRESPONSE A: ...'
+    )
+    assert aobench.snap_category("divergent_meanful", prompt) == "divergent_meaningful"
+    assert aobench.snap_category("Divergent_Noise ", prompt) == "divergent_noise"
+    assert aobench.snap_category("same", prompt) == "same"
+    # Nothing close, or no list of categories in the prompt: left for AObench to count as failed
+    assert aobench.snap_category("unsure", prompt) == "unsure"
+    assert aobench.snap_category("divergent_meanful", "Rate from 1 to 5.") == "divergent_meanful"
+    assert aobench.snap_category(3, prompt) == 3
+
+
+def test_only_the_placeholder_adapter_report_is_hidden():
+    header = "Qwen3ForCausalLM LOAD REPORT from: ceselder/qwen3-8b-ao-v3-best\nKey | Status |\n"
+    placeholder = "model.layers.{0...35}.self_attn.v_proj.lora_A.default.weight | MISSING | \n"
+    oracle = "model.layers.{0...35}.self_attn.v_proj.lora_A.oracle.weight | MISSING | \n"
+    notes = "Notes:\n- MISSING:\tthose params were newly initialized"
+    assert aobench._is_placeholder_adapter_report(header + placeholder * 4 + notes)
+    assert not aobench._is_placeholder_adapter_report(header + placeholder + oracle + notes)
+    assert not aobench._is_placeholder_adapter_report(
+        header + "model.layers.0.mlp.weight | UNEXPECTED | \n" + notes
+    )
+    assert not aobench._is_placeholder_adapter_report("`torch_dtype` is deprecated!")

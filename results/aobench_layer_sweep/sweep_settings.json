@@ -1,0 +1,12 @@
+{
+  "oracle_lora": "ceselder/qwen3-8b-ao-v3-best",
+  "n_positions": null,
+  "sample_limits": null,
+  "prompt_layers": "actual",
+  "target_activations": "base",
+  "aobench_commit": "bec6f8a82c6882faa3a931a88978bd6af0694c27",
+  "judge_model": "Qwen/Qwen3-32B",
+  "judge_prompt_changes": {
+    "hallucination": "Important: a response about the same topic as the actual problem, for example the same kind of problem with different numbers, objects or constraints, is plausible_but_wrong, not obviously_wrong. Use obviously_wrong only when the topic itself is unrelated to the actual problem."
+  }
+}
